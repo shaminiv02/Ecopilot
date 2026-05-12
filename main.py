@@ -43,27 +43,70 @@ async def analyze_decision(context: UserContext):
     Sustainability_Metric: [A number from 1 to 100 rating the original action's eco-friendliness]
     """
     
-    response = model.generate_content(prompt)
-    lines = response.text.strip().split('\n')
-    
     try:
-        # Parsing the LLM output
-        data = {line.split(': ')[0]: line.split(': ')[1] for line in lines if ': ' in line}
-        
-        # Calculate a mock score based on the parsed data
+        response = model.generate_content(prompt)
+    except Exception as e:
+        return {"status": "error", "message": f"AI API call failed: {str(e)}"}
+
+    # Extract text from common response shapes. Different client versions
+    # may provide `text`, `candidates`, or other wrappers — handle them.
+    text = ""
+    if hasattr(response, "text") and isinstance(response.text, str):
+        text = response.text
+    elif hasattr(response, "candidates") and getattr(response, "candidates"):
+        first = response.candidates[0]
+        text = getattr(first, "content", None) or getattr(first, "text", "") or str(first)
+    else:
+        # Fallback to stringifying the whole response
+        try:
+            text = str(response)
+        except Exception:
+            text = ""
+
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+
+    try:
+        # Robust parsing: use partition to avoid fragile splits and accept slight key variations
+        data = {}
+        for line in lines:
+            if ':' in line:
+                key, _, val = line.partition(':')
+                data[key.strip()] = val.strip().strip('"')
+
+        def to_float(key, default=None):
+            v = data.get(key)
+            if v is None or v == "":
+                return default
+            try:
+                return float(v)
+            except Exception:
+                return default
+
+        alternative = data.get('Alternative') or data.get('alternative')
+        co2 = to_float('CO2_Saved_kg') or to_float('CO2_Saved') or 0.0
+        time_impact = to_float('Time_Impact_mins') or to_float('Time_Impact') or 0.0
+        nudge = data.get('Nudge') or data.get('nudge') or ""
+        sustainability_metric = to_float('Sustainability_Metric') or to_float('Sustainability') or 50.0
+
+        # Normalize inputs and compute eco score
+        sustainability = max(0, min(100, sustainability_metric))
+        cost = 80
+        convenience = max(0, min(100, 100 - abs(time_impact)))
+
         eco_score = calculate_score(
-            sustainability=float(data.get('Sustainability_Metric', 50)),
-            cost=80, # Hardcoded for MVP
-            convenience=100 - abs(float(data.get('Time_Impact_mins', 0))) # Simple convenience metric
+            sustainability=sustainability,
+            cost=cost,
+            convenience=convenience
         )
 
         return {
             "status": "success",
-            "alternative": data.get("Alternative"),
-            "co2_saved": data.get("CO2_Saved_kg"),
-            "time_impact": data.get("Time_Impact_mins"),
-            "nudge": data.get("Nudge"),
-            "eco_score": eco_score
+            "alternative": alternative,
+            "co2_saved": round(co2, 3),
+            "time_impact": time_impact,
+            "nudge": nudge,
+            "eco_score": eco_score,
+            "raw_text": text
         }
     except Exception as e:
-        return {"status": "error", "message": "Failed to parse AI response. Try again."}
+        return {"status": "error", "message": f"Failed to parse AI response: {str(e)}", "response_text": text}
